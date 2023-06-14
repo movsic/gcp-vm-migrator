@@ -2,9 +2,10 @@
 # without warranty or representation for any use or purpose.
 # Your use of it is subject to your agreement with Google.
 
-TF_EXPORT_PATH="sap-copy"
-GCP_RESOURCE_TYPE="ComputeDisk,ComputeInstance"
-SOURCE_PROJECT="sap-development"
+TF_EXPORT_PATH="tf-source"
+TF_TARGET_PATH="tf-target"
+GCP_RESOURCE_TYPE="ComputeDisk,ComputeInstance,ComputeSubnetwork"
+SOURCE_PROJECT="movsic-test"
 
 export_infrastructure:
 	gcloud beta resource-config bulk-export \
@@ -12,9 +13,13 @@ export_infrastructure:
 	--project=${SOURCE_PROJECT} \
 	--path=${TF_EXPORT_PATH} \
 	--resource-types=${GCP_RESOURCE_TYPE} \
-	--resource-format=terraform
+	--resource-format=terraform; \
+	gcloud beta resource-config terraform generate-import ${TF_EXPORT_PATH} \
+	 --output-module-file=${TF_EXPORT_PATH}/main.tf \
+	 --output-script-file=${TF_EXPORT_PATH}/import.sh; \
 
 move_files:
+	rm -rf ${TF_TARGET_PATH}; \
 	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep 'ComputeInstance/[a-zA-Z0-9_-]*/[a-zA-Z0-9_-]*.tf'); \
 	for TF_FILE_PATH in $${TF_FILES}; do \
 		echo TF_FILE_PATH: $${TF_FILE_PATH}; \
@@ -30,6 +35,7 @@ move_files:
 		NETWORK=$$(basename $${FULL_NETWORK} | tr -d '"'); \
 		SUBNET=$$(basename $${FULL_SUBNET} | tr -d '"'); \
 		ZONE=$$(basename $${TF_DIR_NAME}); \
+		REGION=$${ZONE%-*}; \
 		BOOT_DISK_NAME=$$(hcledit attribute get resource.google_compute_instance.$${TF_VM_NAME}.boot_disk.source -f $${TF_FILE_PATH} | tr -d '"'); \
 		ATTACHED_DISKS=$$(hcledit block get resource.google_compute_instance.$${TF_VM_NAME}.attached_disk -f $${TF_FILE_PATH} | grep source | cut -d '"' -f2 ); \
 		TF_DIR_NAME_WITHOUT_ZONE=$$(dirname $${TF_DIR_NAME}); \
@@ -40,23 +46,27 @@ move_files:
 		BOOT_DISK_NAME=$${BOOT_DISK_NAME//--/-}; \
 		echo BOOT_DISK_NAME: $${BOOT_DISK_NAME}; \
 		echo ATTACHED_DISKS: $${ATTACHED_DISKS}; \
-		TF_VM_NEW_PATH=$${TF_DIR_NAME_WITHOUT_ZONE}/$${NETWORK}/$${SUBNET}/$${ZONE}; \
-		TF_DISK_NEW_PATH=./${TF_EXPORT_PATH}/${SOURCE_PROJECT}/ComputeDisk/$${NETWORK}/$${SUBNET}/$${ZONE}; \
+		TF_VM_NEW_PATH=./${TF_TARGET_PATH}/${SOURCE_PROJECT}/ComputeInstance/$${NETWORK}/$${SUBNET}/$${ZONE}; \
+		TF_DISK_NEW_PATH=./${TF_TARGET_PATH}/${SOURCE_PROJECT}/ComputeDisk/$${NETWORK}/$${SUBNET}/$${ZONE}; \
+		TF_SUBNET_NEW_PATH=./${TF_TARGET_PATH}/${SOURCE_PROJECT}/ComputeSubnetwork/$${NETWORK}/$${SUBNET}/$${ZONE}; \
 		echo TF_VM_NEW_PATH: $${TF_VM_NEW_PATH}; \
 		mkdir -p $${TF_VM_NEW_PATH}; \
 		mkdir -p $${TF_DISK_NEW_PATH}; \
-		mv $${TF_FILE_PATH} $${TF_VM_NEW_PATH}/$${TF_FILE_NAME}.tf ;\
-		mv ./${TF_EXPORT_PATH}/${SOURCE_PROJECT}/ComputeDisk/$${ZONE}/$${BOOT_DISK_NAME}.tf $${TF_DISK_NEW_PATH}/$${BOOT_DISK_NAME}.tf; \
+		mkdir -p $${TF_SUBNET_NEW_PATH}; \
+		cp $${TF_FILE_PATH} $${TF_VM_NEW_PATH}/$${TF_FILE_NAME}.tf ;\
+		cp ./${TF_EXPORT_PATH}/${SOURCE_PROJECT}/ComputeDisk/$${ZONE}/$${BOOT_DISK_NAME}.tf $${TF_DISK_NEW_PATH}/$${BOOT_DISK_NAME}.tf; \
+		echo ./${TF_EXPORT_PATH}/projects/${SOURCE_PROJECT}/ComputeSubnetwork/$${REGION}/$${SUBNET}.tf; \
+		echo $${TF_SUBNET_NEW_PATH}/$${SUBNET}.tf; \
+		cp ./${TF_EXPORT_PATH}/projects/${SOURCE_PROJECT}/ComputeSubnetwork/$${REGION}/$${SUBNET}.tf $${TF_SUBNET_NEW_PATH}/$${SUBNET}.tf; \
 		for ATTACHED_DISK in $${ATTACHED_DISKS}; do \
 			ATTACHED_DISK=$${ATTACHED_DISK##*\/}; \
 			ATTACHED_DISK=$${ATTACHED_DISK//--/-}; \
-			mv ./${TF_EXPORT_PATH}/${SOURCE_PROJECT}/ComputeDisk/$${ZONE}/$${ATTACHED_DISK}.tf $${TF_DISK_NEW_PATH}/$${ATTACHED_DISK}.tf; \
+			cp ./${TF_EXPORT_PATH}/${SOURCE_PROJECT}/ComputeDisk/$${ZONE}/$${ATTACHED_DISK}.tf $${TF_DISK_NEW_PATH}/$${ATTACHED_DISK}.tf; \
 		done; \
 	done; \
-	find ${TF_EXPORT_PATH} -empty -type d -delete; \
 
 update_vms:
-	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeInstance); \
+	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeInstance); \
 	for TF_FILE in $${TF_FILES}; do \
 		TF_VM_NAME=$$(basename $${TF_FILE//-/_} .tf); \
 		echo TF_FILE: $${TF_FILE}; \
@@ -67,18 +77,15 @@ update_vms:
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.network_interface.subnetwork_project var.project --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.network_interface.network \"https://www.googleapis.com/compute/v1/projects/$$\{var.project\}/global/networks/$$\{var.network\}\" --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.network_interface.subnetwork \"https://www.googleapis.com/compute/v1/projects/$$\{var.project\}/regions/$$\{var.region\}/subnetworks/$$\{var.subnet\}\" --file $${TF_FILE} --update; \
-		hcledit attribute append resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"RUNNING\" --file $${TF_FILE} --update; \
 		gsed -i -E "s/source *= \"https:\/\/www.googleapis.com\/compute\/v1\/projects\/[a-zA-Z0-9-]*\/zones\/[a-zA-Z0-9-]*\/disks\/([a-zA-Z0-9-]*)\"/source = \"https:\/\/www.googleapis.com\/compute\/v1\/projects\/$$\{var.project}\/zones\/$$\{var.zone}\/disks\/\1\"/g" $${TF_FILE}; \
 		gsed -i "/initialize_params {/,/^    }/d" $${TF_FILE}; \
 		gsed -i "/reservation_affinity {/,/^  }/d" $${TF_FILE}; \
-		gsed -i "s/ network_ip/ #network_ip/g" $${TF_FILE}; \
-		gsed -i "s/ nat_ip/ #nat_ip/g" $${TF_FILE}; \
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.machine_type \"f1-micro\" --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.service_account.email \"vm-migration-test@movsic-test.iam.gserviceaccount.com\" --file $${TF_FILE} --update; \
 	done;
 
 update_disks:
-	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeDisk); \
+	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeDisk); \
 	for TF_FILE in $${TF_FILES}; do \
 		TF_DISK_NAME=$$(gsed -nE 's/resource "google_compute_disk" "([a-zA-Z0-9_]*)" \{/\1/pi' $${TF_FILE}); \
 		echo TF_FILE: $${TF_FILE}; \
@@ -90,8 +97,19 @@ update_disks:
 		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.size 10 --file $${TF_FILE} --update; \
 	done;
 
+update_subnets:
+	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeSubnetwork); \
+	for TF_FILE in $${TF_FILES}; do \
+		TF_SUBNET_NAME=$$(gsed -nE 's/resource "google_compute_subnetwork" "([a-zA-Z0-9_]*)" \{/\1/pi' $${TF_FILE}); \
+		echo TF_FILE: $${TF_FILE}; \
+		echo TF_SUBNET_NAME: $${TF_SUBNET_NAME}; \
+		hcledit attribute set resource.google_compute_subnetwork.$${TF_SUBNET_NAME}.network \"https://www.googleapis.com/compute/v1/projects/$$\{var.project\}/global/networks/$$\{var.network\}\" --file $${TF_FILE} --update; \
+		hcledit attribute set resource.google_compute_subnetwork.$${TF_SUBNET_NAME}.region var.region --file $${TF_FILE} --update; \
+		hcledit attribute set resource.google_compute_subnetwork.$${TF_SUBNET_NAME}.project var.project --file $${TF_FILE} --update; \
+	done;
+
 create_snapshot:
-	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeDisk); \
+	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeDisk); \
 	for TF_FILE in $${TF_FILES}; do \
 		TF_DISK_NAME=$$(gsed -nE 's/resource "google_compute_disk" "([a-zA-Z0-9_]*)" \{/\1/pi' $${TF_FILE}); \
 		DISK_NAME=$$(hcledit attribute get resource.google_compute_disk.$${TF_DISK_NAME}.name --file $${TF_FILE} | tr -d '"'); \
@@ -119,10 +137,13 @@ create_snapshot:
 	done;
 
 generate_tf_files:
-	rm -rf ./main.tf;
-	MODULE_PATHS=$$(find ${TF_EXPORT_PATH} -type f -name "*.tf" | xargs -I% dirname % | sort -u); \
-	for MODULE_PATH in $${MODULE_PATHS}; do \
+	rm -rf ./${TF_TARGET_PATH}/main.tf;
+	MODULE_PATHS=$$(find ${TF_TARGET_PATH} -type f -name "*.tf" | xargs -I% dirname % | sort -u); \
+	for MODULE_FULL_PATH in $${MODULE_PATHS}; do \
+		MODULE_PATH=$${MODULE_FULL_PATH//${TF_TARGET_PATH}\//}; \
+		MODULE_NAME=$${MODULE_PATH//\//-}; \
 		echo MODULE_PATH: $${MODULE_PATH}; \
+		echo MODULE_NAME: $${MODULE_NAME}; \
 		echo "variable \"project\" {}\n \
 			variable \"region\" {}\n \
 			variable \"zone\" {}\n \
@@ -133,62 +154,71 @@ generate_tf_files:
 			variable \"source_zone\" {}\n \
 			variable \"source_network\" {}\n \
 			variable \"source_subnet\" {}\n \
-			" > $${MODULE_PATH}/variables.tf; \
+			" > $${MODULE_FULL_PATH}/variables.tf; \
 		MODULE_PATH_ARR=($${MODULE_PATH//\// }); \
-		echo $${MODULE_PATH_ARR[0]}; \
 		if [[ "$${MODULE_PATH}" == *"ComputeInstance"*  ]]; then \
-			echo "module \"$${MODULE_PATH//\//-}\"{\n \
+			echo "module \"$${MODULE_NAME}\"{\n \
 				source = \"./$${MODULE_PATH}\"\n \
-				source_project=\"$${MODULE_PATH_ARR[2]}\"\n \
-				source_region=\"$${MODULE_PATH_ARR[6]%-*}\"\n \
-				source_zone=\"$${MODULE_PATH_ARR[6]}\"\n \
-				source_network=\"$${MODULE_PATH_ARR[4]}\"\n \
-				source_subnet=\"$${MODULE_PATH_ARR[5]}\"\n \
+				source_project=\"$${MODULE_PATH_ARR[0]}\"\n \
+				source_region=\"$${MODULE_PATH_ARR[4]%-*}\"\n \
+				source_zone=\"$${MODULE_PATH_ARR[4]}\"\n \
+				source_network=\"$${MODULE_PATH_ARR[2]}\"\n \
+				source_subnet=\"$${MODULE_PATH_ARR[3]}\"\n \
 				project=\"${TARGET_PROJECT}\"\n \
 				region=\"${TARGET_REGION}\"\n \
 				zone=\"${TARGET_ZONE}\"\n \
 				network=\"${TARGET_NETWORK}\"\n \
 				subnet=\"${TARGET_SUBNET}\"\n \
-			}" >> ./main.tf; \
-			hcledit attribute append module.$${MODULE_PATH//\//-}.depends_on [module.${TF_EXPORT_PATH}-$${MODULE_PATH_ARR[2]}-ComputeDisk-$${MODULE_PATH_ARR[4]}-$${MODULE_PATH_ARR[5]}-$${MODULE_PATH_ARR[6]}] --newline --file ./main.tf --update; \
+			}" >> ./${TF_TARGET_PATH}/main.tf; \
+			hcledit attribute append module.$${MODULE_PATH//\//-}.depends_on [module.$${MODULE_PATH_ARR[0]}-ComputeDisk-$${MODULE_PATH_ARR[2]}-$${MODULE_PATH_ARR[3]}-$${MODULE_PATH_ARR[4]},module.$${MODULE_PATH_ARR[0]}-ComputeSubnetwork-$${MODULE_PATH_ARR[2]}-$${MODULE_PATH_ARR[3]}-$${MODULE_PATH_ARR[4]}] --newline --file ./${TF_TARGET_PATH}/main.tf --update; \
 		fi; \
 		if [[ "$${MODULE_PATH}" == *"ComputeDisk"*  ]]; then \
-			echo "module \"$${MODULE_PATH//\//-}\"{\n \
+			echo "module \"$${MODULE_NAME}\"{\n \
 				source = \"./$${MODULE_PATH}\"\n \
-				source_project=\"$${MODULE_PATH_ARR[1]}\"\n \
-				source_region=\"$${MODULE_PATH_ARR[5]%-*}\"\n \
-				source_zone=\"$${MODULE_PATH_ARR[5]}\"\n \
-				source_network=\"$${MODULE_PATH_ARR[3]}\"\n \
-				source_subnet=\"$${MODULE_PATH_ARR[4]}\"\n \
+				source_project=\"$${MODULE_PATH_ARR[0]}\"\n \
+				source_region=\"$${MODULE_PATH_ARR[4]%-*}\"\n \
+				source_zone=\"$${MODULE_PATH_ARR[4]}\"\n \
+				source_network=\"$${MODULE_PATH_ARR[2]}\"\n \
+				source_subnet=\"$${MODULE_PATH_ARR[3]}\"\n \
 				project=\"${TARGET_PROJECT}\"\n \
 				region=\"${TARGET_REGION}\"\n \
 				zone=\"${TARGET_ZONE}\"\n \
-				network=\"${TARGET_NETWORK}\"\n \
-				subnet=\"${TARGET_SUBNET}\"\n \
-			}" >> ./main.tf; \
-			hcledit attribute append module.$${MODULE_PATH//\//-}.depends_on [module.${TF_EXPORT_PATH}-$${MODULE_PATH_ARR[1]}-ComputeSnapshot-$${MODULE_PATH_ARR[3]}-$${MODULE_PATH_ARR[4]}-$${MODULE_PATH_ARR[5]}] --newline --file ./main.tf --update; \
+			}" >> ./${TF_TARGET_PATH}/main.tf; \
+			hcledit attribute append module.$${MODULE_PATH//\//-}.depends_on [module.$${MODULE_PATH_ARR[0]}-ComputeSnapshot-$${MODULE_PATH_ARR[2]}-$${MODULE_PATH_ARR[3]}-$${MODULE_PATH_ARR[4]}] --newline --file ./${TF_TARGET_PATH}/main.tf --update; \
 		fi; \
 		if [[ "$${MODULE_PATH}" == *"ComputeSnapshot"*  ]]; then \
-			echo "module \"$${MODULE_PATH//\//-}\"{\n \
+			echo "module \"$${MODULE_NAME}\"{\n \
 				source = \"./$${MODULE_PATH}\"\n \
-				source_project=\"$${MODULE_PATH_ARR[1]}\"\n \
-				source_region=\"$${MODULE_PATH_ARR[5]%-*}\"\n \
-				source_zone=\"$${MODULE_PATH_ARR[5]}\"\n \
-				source_network=\"$${MODULE_PATH_ARR[3]}\"\n \
-				source_subnet=\"$${MODULE_PATH_ARR[4]}\"\n \
+				source_project=\"$${MODULE_PATH_ARR[0]}\"\n \
+				source_region=\"$${MODULE_PATH_ARR[4]%-*}\"\n \
+				source_zone=\"$${MODULE_PATH_ARR[4]}\"\n \
+				source_network=\"$${MODULE_PATH_ARR[2]}\"\n \
+				source_subnet=\"$${MODULE_PATH_ARR[3]}\"\n \
+				project=\"${TARGET_PROJECT}\"\n \
+				region=\"${TARGET_REGION}\"\n \
+				zone=\"${TARGET_ZONE}\"\n \
+			}" >> ./${TF_TARGET_PATH}/main.tf; \
+		fi; \
+		if [[ "$${MODULE_PATH}" == *"ComputeSubnetwork"*  ]]; then \
+			echo "module \"$${MODULE_NAME}\"{\n \
+				source = \"./$${MODULE_PATH}\"\n \
+				source_project=\"$${MODULE_PATH_ARR[0]}\"\n \
+				source_region=\"$${MODULE_PATH_ARR[4]%-*}\"\n \
+				source_zone=\"$${MODULE_PATH_ARR[4]}\"\n \
+				source_network=\"$${MODULE_PATH_ARR[2]}\"\n \
+				source_subnet=\"$${MODULE_PATH_ARR[3]}\"\n \
 				project=\"${TARGET_PROJECT}\"\n \
 				region=\"${TARGET_REGION}\"\n \
 				zone=\"${TARGET_ZONE}\"\n \
 				network=\"${TARGET_NETWORK}\"\n \
-				subnet=\"${TARGET_SUBNET}\"\n \
-			}" >> ./main.tf; \
+			}" >> ./${TF_TARGET_PATH}/main.tf; \
 		fi; \
 	done;
-	terraform fmt -recursive ${TF_EXPORT_PATH}
+	terraform fmt -recursive ${TF_TARGET_PATH}
 
 add_snapshot:
 	TIME_NOW=$$(date +'%Y_%m_%d_%H_%M_%S'); \
-	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeSnapshot); \
+	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeSnapshot); \
 	for TF_FILE in $${TF_FILES}; do \
 		echo TF_FILE: $${TF_FILE}; \
 		TF_FILE_NAME=$$(basename $${TF_FILE} .tf); \
@@ -212,8 +242,7 @@ add_snapshot:
 	done;
 
 update_disk_source:
-	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeDisk); \
-	echo $${TF_FILES}; \
+	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeDisk); \
 	for TF_FILE in $${TF_FILES}; do \
 		TF_FILE_NAME=$$(basename $${TF_FILE} .tf); \
 		if [ "$${TF_FILE_NAME}" = "variables" ]; then \
@@ -231,19 +260,18 @@ update_disk_source:
 		hcledit attribute rm resource.google_compute_disk.$${TF_DISK_NAME}.image --file $${TF_FILE} --update; \
 	done; \
 
-restore_ips:
-	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeInstance); \
-	for TF_FILE in $${TF_FILES}; do \
-		gsed -i "s/ #network_ip/ network_ip/g" $${TF_FILE}; \
-		gsed -i "s/ #nat_ip/ nat_ip/g" $${TF_FILE}; \
-	done; \
-
 stop_vms:
 	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeInstance); \
 	for TF_FILE in $${TF_FILES}; do \
 		TF_VM_NAME=$$(basename $${TF_FILE//-/_} .tf); \
+		if [ "$${TF_VM_NAME}" = "variables" ]; then \
+			echo "$${TF_FILE} file -> skipping"; \
+			continue; \
+		fi; \
+		hcledit attribute append resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"TERMINATED\" --newline --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"TERMINATED\" --file $${TF_FILE} --update; \
 	done;
+	#		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.boot_disk.auto_delete false --file $${TF_FILE} --update; \
 
 start_vms:
 	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeInstance); \
@@ -254,11 +282,12 @@ start_vms:
 			continue; \
 		fi; \
 		echo TF_VM_NAME $${TF_VM_NAME}; \
+		hcledit attribute append resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"RUNNING\" --newline --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"RUNNING\" --file $${TF_FILE} --update; \
 	done;
 
 diff_vms:
-	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeInstance); \
+	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeInstance); \
 	for TF_FILE in $${TF_FILES}; do \
 		echo TF_FILE $${TF_FILE}; \
 		TF_VM_NAME=$$(basename $${TF_FILE//-/_} .tf); \
@@ -271,20 +300,33 @@ diff_vms:
 		echo VM_NAME $${VM_NAME}; \
 		TF_FILE_ARR=($${TF_FILE//\// }); \
 		echo TF_FILE_ARR $${TF_FILE_ARR[@]}; \
-		echo ${TF_EXPORT_PATH}-projects-$${TF_FILE_ARR[3]}-ComputeInstance-$${TF_FILE_ARR[5]}-$${TF_FILE_ARR[6]}-$${TF_FILE_ARR[7]}; \
-		SOURCE=$$(hcledit attribute get module.${TF_EXPORT_PATH}-projects-$${TF_FILE_ARR[3]}-ComputeInstance-$${TF_FILE_ARR[5]}-$${TF_FILE_ARR[6]}-$${TF_FILE_ARR[7]}.source -f ./main.tf | tr -d '"'); \
-		TARGET_VM_ZONE=$$(hcledit attribute get module.${TF_EXPORT_PATH}-projects-$${TF_FILE_ARR[3]}-ComputeInstance-$${TF_FILE_ARR[5]}-$${TF_FILE_ARR[6]}-$${TF_FILE_ARR[7]}.zone -f ./main.tf | tr -d '"'); \
+		SOURCE=$$(hcledit attribute get module.projects-$${TF_FILE_ARR[3]}-ComputeInstance-$${TF_FILE_ARR[5]}-$${TF_FILE_ARR[6]}-$${TF_FILE_ARR[7]}.source -f ./${TF_TARGET_PATH}/main.tf | tr -d '"'); \
+		TARGET_VM_ZONE=$$(hcledit attribute get module.projects-$${TF_FILE_ARR[3]}-ComputeInstance-$${TF_FILE_ARR[5]}-$${TF_FILE_ARR[6]}-$${TF_FILE_ARR[7]}.zone -f ./${TF_TARGET_PATH}/main.tf | tr -d '"'); \
 		echo TARGET_VM_ZONE $${TARGET_VM_ZONE}; \
-		TARGET_VM_PROJECT=$$(hcledit attribute get module.${TF_EXPORT_PATH}-projects-$${TF_FILE_ARR[3]}-ComputeInstance-$${TF_FILE_ARR[5]}-$${TF_FILE_ARR[6]}-$${TF_FILE_ARR[7]}.project -f ./main.tf | tr -d '"'); \
+		TARGET_VM_PROJECT=$$(hcledit attribute get module.projects-$${TF_FILE_ARR[3]}-ComputeInstance-$${TF_FILE_ARR[5]}-$${TF_FILE_ARR[6]}-$${TF_FILE_ARR[7]}.project -f ./${TF_TARGET_PATH}/main.tf | tr -d '"'); \
 		echo TARGET_VM_PROJECT $${TARGET_VM_PROJECT}; \
 		if [ -n "$${SOURCE}" ]; then \
 			diff <( gcloud compute instances describe $${VM_NAME} --zone=$${SOURCE_VM_ZONE} --project=${SOURCE_PROJECT} ) <( gcloud compute instances describe $${VM_NAME} --zone=$${TARGET_VM_ZONE} --project=$${TARGET_VM_PROJECT} ); \
 		fi; \
 	done; \
 
+tf_target_apply:
+	terraform -chdir=${TF_TARGET_PATH} init; \
+	terraform -chdir=${TF_TARGET_PATH} apply -parallelism=500 -auto-approve; \
+
+tf_source_import:
+	terraform -chdir=${TF_EXPORT_PATH} init; \
+	cd ${TF_EXPORT_PATH} && sh import.sh; \
+
+tf_source_apply:
+	terraform -chdir=${TF_EXPORT_PATH} init; \
+	terraform -chdir=${TF_EXPORT_PATH} apply -parallelism=500 -auto-approve; \
+
+tf_source_destroy:
+	terraform -chdir=${TF_EXPORT_PATH} init; \
+	terraform -chdir=${TF_EXPORT_PATH} destroy -parallelism=500 -auto-approve; \
+
 clean:
 	terraform destroy --auto-approve
-	rm -rf main.tf
 	rm -rf ${TF_EXPORT_PATH}
-	rm -rf .terraform*
-	rm -rf terraform*
+	rm -rf ${TF_TARGET_PATH}
