@@ -5,7 +5,7 @@
 TF_EXPORT_PATH="tf-source"
 TF_TARGET_PATH="tf-target"
 GCP_RESOURCE_TYPE="ComputeDisk,ComputeInstance,ComputeSubnetwork"
-SOURCE_PROJECT="movsic-test"
+SOURCE_PROJECT=""
 
 export_infrastructure:
 	gcloud beta resource-config bulk-export \
@@ -80,8 +80,6 @@ update_vms:
 		gsed -i -E "s/source *= \"https:\/\/www.googleapis.com\/compute\/v1\/projects\/[a-zA-Z0-9-]*\/zones\/[a-zA-Z0-9-]*\/disks\/([a-zA-Z0-9-]*)\"/source = \"https:\/\/www.googleapis.com\/compute\/v1\/projects\/$$\{var.project}\/zones\/$$\{var.zone}\/disks\/\1\"/g" $${TF_FILE}; \
 		gsed -i "/initialize_params {/,/^    }/d" $${TF_FILE}; \
 		gsed -i "/reservation_affinity {/,/^  }/d" $${TF_FILE}; \
-		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.machine_type \"f1-micro\" --file $${TF_FILE} --update; \
-		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.service_account.email \"vm-migration-test@movsic-test.iam.gserviceaccount.com\" --file $${TF_FILE} --update; \
 	done;
 
 update_disks:
@@ -92,9 +90,6 @@ update_disks:
 		echo TF_DISK_NAME: $${TF_DISK_NAME}; \
 		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.zone var.zone --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.project var.project --file $${TF_FILE} --update; \
-		hcledit attribute append resource.google_compute_disk.$${TF_DISK_NAME}.image \"https://www.googleapis.com/compute/beta/projects/debian-cloud/global/images/debian-11-bullseye-v20230509\" --file $${TF_FILE} --update; \
-		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.image \"https://www.googleapis.com/compute/beta/projects/debian-cloud/global/images/debian-11-bullseye-v20230509\" --file $${TF_FILE} --update; \
-		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.size 10 --file $${TF_FILE} --update; \
 	done;
 
 update_subnets:
@@ -122,14 +117,9 @@ create_snapshot:
 			continue; \
 		fi; \
 		mkdir -p $${TF_SNAPSHOT_PATH}; \
-		echo "data \"google_compute_disk\" \"$${TF_DISK_NAME}\" {\n \
-			name    = \"$${DISK_NAME}\"\n \
-			project = var.source_project\n \
-			zone = var.source_zone\n \
-		}" > $${TF_SNAPSHOT_FILE}; \
 		echo "resource \"google_compute_snapshot\" \"$${TF_DISK_NAME}_snapshot_init\" {\n \
 			name = \"$${DISK_NAME}-snapshot\"\n \
-			source_disk = data.google_compute_disk.$${TF_DISK_NAME}.id\n \
+			source_disk = \"https://www.googleapis.com/compute/v1/projects/\$${var.source_project}/zones/\$${var.source_zone}/disks/$${DISK_NAME}\"\n \
 			zone = var.zone\n \
 			project = var.project\n \
 			storage_locations = [var.region]\n \
@@ -183,6 +173,8 @@ generate_tf_files:
 				project=\"${TARGET_PROJECT}\"\n \
 				region=\"${TARGET_REGION}\"\n \
 				zone=\"${TARGET_ZONE}\"\n \
+				network=\"${TARGET_NETWORK}\"\n \
+				subnet=\"${TARGET_SUBNET}\"\n \
 			}" >> ./${TF_TARGET_PATH}/main.tf; \
 			hcledit attribute append module.$${MODULE_PATH//\//-}.depends_on [module.$${MODULE_PATH_ARR[0]}-ComputeSnapshot-$${MODULE_PATH_ARR[2]}-$${MODULE_PATH_ARR[3]}-$${MODULE_PATH_ARR[4]}] --newline --file ./${TF_TARGET_PATH}/main.tf --update; \
 		fi; \
@@ -197,6 +189,8 @@ generate_tf_files:
 				project=\"${TARGET_PROJECT}\"\n \
 				region=\"${TARGET_REGION}\"\n \
 				zone=\"${TARGET_ZONE}\"\n \
+				network=\"${TARGET_NETWORK}\"\n \
+				subnet=\"${TARGET_SUBNET}\"\n \
 			}" >> ./${TF_TARGET_PATH}/main.tf; \
 		fi; \
 		if [[ "$${MODULE_PATH}" == *"ComputeSubnetwork"*  ]]; then \
@@ -211,34 +205,37 @@ generate_tf_files:
 				region=\"${TARGET_REGION}\"\n \
 				zone=\"${TARGET_ZONE}\"\n \
 				network=\"${TARGET_NETWORK}\"\n \
+				subnet=\"${TARGET_SUBNET}\"\n \
 			}" >> ./${TF_TARGET_PATH}/main.tf; \
 		fi; \
 	done;
 	terraform fmt -recursive ${TF_TARGET_PATH}
 
+update_terraform: move_files update_vms update_disks update_subnets create_snapshot generate_tf_files
+
 add_snapshot:
 	TIME_NOW=$$(date +'%Y_%m_%d_%H_%M_%S'); \
-	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeSnapshot); \
+	TF_FILES=$$(find ./${TF_TARGET_PATH} -type f -name "*.tf" | grep ComputeDisk); \
 	for TF_FILE in $${TF_FILES}; do \
-		echo TF_FILE: $${TF_FILE}; \
-		TF_FILE_NAME=$$(basename $${TF_FILE} .tf); \
-		echo TF_FILE_NAME $${TF_FILE_NAME}; \
-		TF_DISK_NAME=$$(gsed -nE 's/data "google_compute_disk" "([a-zA-Z0-9_]*)" \{/\1/pi' $${TF_FILE}); \
-		echo TF_DISK_NAME $${TF_DISK_NAME}; \
-		echo data.google_compute_disk.$${TF_DISK_NAME}.name; \
-		DISK_NAME=$$(hcledit attribute get data.google_compute_disk.$${TF_DISK_NAME}.name --file $${TF_FILE} | tr -d '"'); \
-		echo DISK_NAME $${DISK_NAME}; \
-		if [ "$${TF_FILE_NAME}" = "variables" ]; then \
-			echo "$${TF_FILE} file -> skipping"; \
+		TF_DISK_NAME=$$(gsed -nE 's/resource "google_compute_disk" "([a-zA-Z0-9_]*)" \{/\1/pi' $${TF_FILE}); \
+		DISK_NAME=$$(hcledit attribute get resource.google_compute_disk.$${TF_DISK_NAME}.name --file $${TF_FILE} | tr -d '"'); \
+		echo TF_DISK_NAME: $${TF_DISK_NAME}; \
+		echo DISK_NAME: $${DISK_NAME}; \
+		TF_SNAPSHOT_FILE=$${TF_FILE//ComputeDisk/ComputeSnapshot}; \
+		echo TF_SNAPSHOT_FILE: $${TF_SNAPSHOT_FILE}; \
+		TF_SNAPSHOT_PATH=$$(dirname $${TF_SNAPSHOT_FILE}); \
+		if [ -z "$${TF_DISK_NAME}" ]; then \
+			echo "Variable file -> skipping"; \
 			continue; \
 		fi; \
+		mkdir -p $${TF_SNAPSHOT_PATH}; \
 		echo "resource \"google_compute_snapshot\" \"$${TF_DISK_NAME}_$${TIME_NOW}\" {\n \
 			name = \"$${DISK_NAME}-snapshot-$${TIME_NOW//_/-}\"\n \
-			source_disk = data.google_compute_disk.$${TF_DISK_NAME}.id\n \
+			source_disk = \"https://www.googleapis.com/compute/v1/projects/\$${var.source_project}/zones/\$${var.source_zone}/disks/$${DISK_NAME}\"\n \
 			zone = var.zone\n \
 			project = var.project\n \
 			storage_locations = [var.region]\n \
-		}" >> $${TF_FILE}; \
+		}" >> $${TF_SNAPSHOT_FILE}; \
 	done;
 
 update_disk_source:
@@ -271,7 +268,7 @@ stop_vms:
 		hcledit attribute append resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"TERMINATED\" --newline --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"TERMINATED\" --file $${TF_FILE} --update; \
 	done;
-	#		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.boot_disk.auto_delete false --file $${TF_FILE} --update; \
+	#hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.boot_disk.auto_delete false --file $${TF_FILE} --update; \
 
 start_vms:
 	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeInstance); \
@@ -312,7 +309,8 @@ diff_vms:
 
 tf_target_apply:
 	terraform -chdir=${TF_TARGET_PATH} init; \
-	terraform -chdir=${TF_TARGET_PATH} apply -parallelism=500 -auto-approve; \
+	terraform -chdir=${TF_TARGET_PATH} plan -refresh=false -out=plan.tfplan; \
+	terraform -chdir=${TF_TARGET_PATH} apply -parallelism=1000 -auto-approve plan.tfplan; \
 
 tf_source_import:
 	terraform -chdir=${TF_EXPORT_PATH} init; \
@@ -320,13 +318,14 @@ tf_source_import:
 
 tf_source_apply:
 	terraform -chdir=${TF_EXPORT_PATH} init; \
-	terraform -chdir=${TF_EXPORT_PATH} apply -parallelism=500 -auto-approve; \
+	terraform -chdir=${TF_TARGET_PATH} plan -refresh=false -out=plan.tfplan; \
+	terraform -chdir=${TF_TARGET_PATH} apply -parallelism=500 -auto-approve plan.tfplan; \
 
 tf_source_destroy:
 	terraform -chdir=${TF_EXPORT_PATH} init; \
 	terraform -chdir=${TF_EXPORT_PATH} destroy -parallelism=500 -auto-approve; \
 
 clean:
-	terraform destroy --auto-approve
+	terraform -chdir=${TF_EXPORT_PATH} destroy -parallelism=500 --auto-approve
 	rm -rf ${TF_EXPORT_PATH}
 	rm -rf ${TF_TARGET_PATH}
