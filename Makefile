@@ -2,10 +2,10 @@
 # without warranty or representation for any use or purpose.
 # Your use of it is subject to your agreement with Google.
 
-TF_EXPORT_PATH="tf-source"
-TF_TARGET_PATH="tf-target"
+SOURCE_PROJECT="sap-development"
+TF_EXPORT_PATH="sap-source"
+TF_TARGET_PATH="sap-target"
 GCP_RESOURCE_TYPE="ComputeDisk,ComputeInstance,ComputeSubnetwork"
-SOURCE_PROJECT="movsic-test"
 
 export_infrastructure:
 	gcloud beta resource-config bulk-export \
@@ -80,8 +80,6 @@ update_vms:
 		gsed -i -E "s/source *= \"https:\/\/www.googleapis.com\/compute\/v1\/projects\/[a-zA-Z0-9-]*\/zones\/[a-zA-Z0-9-]*\/disks\/([a-zA-Z0-9-]*)\"/source = \"https:\/\/www.googleapis.com\/compute\/v1\/projects\/$$\{var.project}\/zones\/$$\{var.zone}\/disks\/\1\"/g" $${TF_FILE}; \
 		gsed -i "/initialize_params {/,/^    }/d" $${TF_FILE}; \
 		gsed -i "/reservation_affinity {/,/^  }/d" $${TF_FILE}; \
-		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.machine_type \"f1-micro\" --file $${TF_FILE} --update; \
-		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.service_account.email \"vm-migration-test@movsic-test.iam.gserviceaccount.com\" --file $${TF_FILE} --update; \
 	done;
 
 update_disks:
@@ -92,9 +90,6 @@ update_disks:
 		echo TF_DISK_NAME: $${TF_DISK_NAME}; \
 		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.zone var.zone --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.project var.project --file $${TF_FILE} --update; \
-		hcledit attribute append resource.google_compute_disk.$${TF_DISK_NAME}.image \"https://www.googleapis.com/compute/beta/projects/debian-cloud/global/images/debian-11-bullseye-v20230509\" --file $${TF_FILE} --update; \
-		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.image \"https://www.googleapis.com/compute/beta/projects/debian-cloud/global/images/debian-11-bullseye-v20230509\" --file $${TF_FILE} --update; \
-		hcledit attribute set resource.google_compute_disk.$${TF_DISK_NAME}.size 10 --file $${TF_FILE} --update; \
 	done;
 
 update_subnets:
@@ -273,7 +268,17 @@ stop_vms:
 		hcledit attribute append resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"TERMINATED\" --newline --file $${TF_FILE} --update; \
 		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.desired_status \"TERMINATED\" --file $${TF_FILE} --update; \
 	done;
-	#hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.boot_disk.auto_delete false --file $${TF_FILE} --update; \
+
+keep_boot_disks:
+	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeInstance); \
+	for TF_FILE in $${TF_FILES}; do \
+		TF_VM_NAME=$$(basename $${TF_FILE//-/_} .tf); \
+		if [ "$${TF_VM_NAME}" = "variables" ]; then \
+			echo "$${TF_FILE} file -> skipping"; \
+			continue; \
+		fi; \
+		hcledit attribute set resource.google_compute_instance.$${TF_VM_NAME}.boot_disk.auto_delete false --file $${TF_FILE} --update; \
+	done;	
 
 start_vms:
 	TF_FILES=$$(find ./${TF_EXPORT_PATH} -type f -name "*.tf" | grep ComputeInstance); \
@@ -331,6 +336,7 @@ tf_source_destroy:
 	terraform -chdir=${TF_EXPORT_PATH} destroy -parallelism=500 -auto-approve; \
 
 clean:
-	terraform -chdir=${TF_EXPORT_PATH} destroy -parallelism=500 --auto-approve
-	rm -rf ${TF_EXPORT_PATH}
-	rm -rf ${TF_TARGET_PATH}
+	terraform -chdir=${TF_EXPORT_PATH} destroy -parallelism=1000 --auto-approve
+	terraform -chdir=${TF_TARGET_PATH} destroy -parallelism=1000 --auto-approve
+	# rm -rf ${TF_EXPORT_PATH}
+	# rm -rf ${TF_TARGET_PATH}
